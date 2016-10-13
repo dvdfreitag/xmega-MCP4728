@@ -12,7 +12,7 @@ TARGET = libMCP4728.a
 	$(CC) $(CFLAGS) $(MCU) -MD -MP -MF "$(@:%.o=%.d)" -MT"$(@:%.o=%.d)" -MT"$(@:%.o=%.o)" -o "$@" "$<"
 
 $(TARGET): $(OBJS)
-	$(AR) -r -o"$@" $(OBJS)
+	$(AR) -rcs -o"$@" $(OBJS)
 
 .PHONY: clean
 clean:
