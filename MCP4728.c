@@ -1,10 +1,9 @@
 #include <avr/io.h>
 
 #include "MCP4728.h"
+#include "SoftwareTWI.h"
 
-#ifndef _HARDWARE_TWI_
-	#include "SoftwareTWI.h"
-#else
+#ifdef _HARDWARE_TWI_
 	#include "TWI.h"
 #endif
 
@@ -22,7 +21,6 @@
 #define SEQWRITE		0x50U
 #define SINGLEWRITE		0x58U
 
-#define WRITEADDRESS	0x60U
 #define WRITECURRENT	0x61U
 #define WRITENEW		0x62U
 #define WRITECONFIRM	0x63U
@@ -32,10 +30,6 @@
 #define WRITEGAIN		0xC0U
 
 #define NOP asm volatile("nop");
-// Quarter-bit delay
-void qdelay(void) { NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP }
-// Half-bit delay
-void hdelay(void) { qdelay(); qdelay(); }
 
 #ifndef _HARDWARE_TWI_
 	#define twi_start	STWI_Start
@@ -85,45 +79,48 @@ uint8_t general_call(uint8_t code)
 	if (twi_write(GENERAL_CALL) != twi_ack) goto error;
 	if (twi_write(code) != twi_ack) goto error;
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
 uint8_t twi_write_ldac(PORT_t *twi, uint8_t sda, uint8_t scl, uint8_t data)
 {
-	for (int8_t i = 7; i >= 0; i--)
-	{// Write the data bit
-		if (data & (1 << i))
+	for (uint8_t i = 0; i < 8; i++)
+	{
+		if (data & 0x80)
 		{
-			twi->DIRCLR = sda; // Set SDA high
+			twi->DIRCLR = sda;
 		}
 		else
 		{
-			twi->DIRSET = sda;	// Set SDA low
+			twi->DIRSET = sda;
 		}
-		// One clock transition
-		hdelay();
-		twi->DIRCLR = scl;	// Set SCL high
-		hdelay();
-		twi->DIRSET = scl;	// Set SCL low
+		
+		data <<= 1;
+		
+		NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+		NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+		twi->DIRCLR = scl;
+		NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+		NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+		twi->DIRSET = scl;
 	}
-	// Ensure SDA is "high" -> SDA is an input.
-	// This is where the slave will indicate an ACK by actively pulling SDA down,
-	//   or a NACK is indicated by no response.
-	twi->DIRCLR = sda;	// Set SDA high
-	LDACPort->OUTCLR = LDAC; // Set LDAC low
-	hdelay();
-	twi->DIRCLR = scl;	// Set SCL high
-	data = twi->IN & sda; // Get ACK bit
-	hdelay();
-	twi->DIRSET = scl;	// Set SCL low
-	hdelay();
-
-	return (data != 0);
+	
+	twi->DIRCLR = sda;
+	LDACPort->OUTCLR = LDAC;
+	NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+	NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+	twi->DIRCLR = scl;
+	data = twi->IN & sda;
+	NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+	NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP NOP
+	twi->DIRSET = scl;
+	
+	return data;
 }
 
 uint8_t MCP4728_Reset(void)
@@ -144,42 +141,43 @@ uint8_t MCP4728_Update(void)
 #ifndef _HARDWARE_TWI_
 	uint8_t MCP4728_ReadAddress(void)
 #else
-	uint8_t MCP4728_ReadAddress(PORT_t *twi, uint8_t sda, uint8_t sda)
+	uint8_t MCP4728_ReadAddress(PORT_t *twi, uint8_t sda, uint8_t scl)
 #endif
 {
 	if (!TWI || !LDACPort) return twi_nack;
 	
 	LDACPort->OUTSET = LDAC;
-
-	#ifndef _HARDWARE_TWI_
-		twi_start(TWI, SDA, SCL);
-	#else
-		twi_start(TWI);
-	#endif
-
-	if (twi_write(GENERAL_CALL) != twi_ack) goto error;
 	
-	#ifndef _HARDWARE_TWI_
-		if (twi_write_ldac(TWI, SDA, SCL, READADDRESS) != twi_ack) goto error;
-	#else
-		TWI->MASTER.CTRLA &= ~TWI_MASTER_ENABLE_bm;
-		if (twi_write_ldac(twi, sda, scl, READADDRESS) != twi_ack) goto error;
-		TWI->MASTER.CTRLA |= TWI_MASTER_ENABLE_bm;
-	#endif
+	// Generate START condition
+	STWI_Start(twi, sda, scl);
+	// Write General Call
+	if (STWI_WriteByte(GENERAL_CALL) != twi_ack) 
+	{
+		goto error;
+	}
+	// Write old address with LDAC transition
+	if (twi_write_ldac(twi, sda, scl, READADDRESS) != twi_ack)
+	{
+		goto error;
+	}
+	// Generate RESTART condition
+	STWI_Restart();
+	// Write restart byte
+	if (STWI_WriteByte(READRESTART) != twi_ack)
+	{
+		goto error;
+	}
+	// Read response
+	uint8_t data = STWI_ReadByte(twi_nack);
 
-	twi_restart();
-
-	if (twi_write(READRESTART) != twi_ack) goto error;
-	uint8_t address = twi_read(twi_nack);
-
-	twi_stop();
+	STWI_Stop();
 	LDACPort->OUTSET = LDAC;
-	return address;
+	return data;
 
 error:
-	twi_stop();
+	STWI_Stop();
 	LDACPort->OUTSET = LDAC;
-	return twi_nack;
+	return 0xFF;
 }
 
 uint8_t MCP4728_FastWrite(uint8_t *data, uint8_t length)
@@ -206,11 +204,42 @@ uint8_t MCP4728_FastWrite(uint8_t *data, uint8_t length)
 		}
 	}
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
+	return twi_nack;
+}
+
+uint8_t MCP4728_WriteAll(uint16_t value)
+{
+	if (!TWI) return twi_nack;
+	uint8_t *ptr = (uint8_t *)&value;
+	
+	#ifndef _HARDWARE_TWI_
+		twi_start(TWI, SDA, SCL);
+	#else
+		twi_start(TWI);
+	#endif
+	
+	if (twi_write(DEVICE_CODE | Address) != twi_ack) goto error;
+	
+	for (uint8_t i = 0; i < 4; i++)
+	{
+		uint8_t vref = MCP4728_GetVREF(i, 0);
+		uint8_t gain = MCP4728_GetGain(i, 0);
+		
+		if (twi_write(MULTIWRITE | (i << 1))) goto error;
+		if (twi_write((ptr[1] & 0x0F) | vref | gain) != twi_ack) goto error;
+		if (twi_write(ptr[0]) != twi_ack) goto error;
+	}
+	
+	twi_stop(twi_ack);
+	return twi_ack;
+
+error:
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -234,11 +263,38 @@ uint8_t MCP4728_MultiWrite(uint8_t *data, uint8_t length)
 		if (twi_write(*ptr++) != twi_ack) goto error;
 	}
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
+	return twi_nack;
+}
+
+uint8_t MCP4728_SingleWriteFast(uint8_t *data, uint8_t channel)
+{
+	if (!TWI) return twi_nack;
+	if (channel > 3) return twi_nack;
+
+	#ifndef _HARDWARE_TWI_
+		twi_start(TWI, SDA, SCL);
+	#else
+		twi_start(TWI);
+	#endif
+	
+	uint8_t vref = MCP4728_GetVREF(channel, 0);
+	uint8_t gain = MCP4728_GetGain(channel, 0);
+	
+	if (twi_write(DEVICE_CODE | Address) != twi_ack) goto error;
+	if (twi_write(MULTIWRITE | (channel << 1)) != twi_ack) goto error;
+	if (twi_write((data[1] & 0x0F) | vref | gain) != twi_ack) goto error;
+	if (twi_write(data[0]) != twi_ack) goto error;
+	
+	twi_stop(twi_ack);
+	return twi_ack;
+
+error:
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -262,11 +318,11 @@ uint8_t MCP4728_SequentialWrite(uint8_t start, uint8_t *data)
 		if (twi_write(*ptr++) != twi_ack) goto error;
 	}
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -286,51 +342,44 @@ uint8_t MCP4728_SingleWrite(uint8_t channel, uint16_t data)
 	if (twi_write((uint8_t)(data >> 8)) != twi_ack) goto error;
 	if (twi_write((uint8_t)(data & 0x00FF)) != twi_ack) goto error;
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
 #ifndef _HARDWARE_TWI_
 	uint8_t MCP4728_WriteAddress(uint8_t new)
 #else
-	uint8_t MCP4728_WriteAddress(PORT_t *twi, uint8_t sda, uint8_t sda, uint8_t new)
+	uint8_t MCP4728_WriteAddress(PORT_t *twi, uint8_t sda, uint8_t scl, uint8_t new)
 #endif
 {
 	if (!TWI || !LDACPort) return twi_nack;
 
 	LDACPort->OUTSET = LDAC;
-
-	#ifndef _HARDWARE_TWI_
-		twi_start(TWI, SDA, SCL);
-	#else
-		twi_start(TWI);
-	#endif
-
-	if (twi_write(DEVICE_CODE | Address) != twi_ack) goto error;
 	
-	#ifndef _HARDWARE_TWI_
-		if (twi_write_ldac(TWI, SDA, SCL, WRITEADDRESS | (Address << 1)) != twi_ack) goto error;
-	#else
-		TWI->MASTER.CTRLA &= ~TWI_MASTER_ENABLE_bm;
-		if (twi_write_ldac(twi, sda, scl, WRITEADDRESS | (Address << 1)) != twi_ack) goto error;
-		TWI->MASTER.CTRLA |= TWI_MASTER_ENABLE_bm;
-	#endif
+	// Generate START condition
+	STWI_Start(twi, sda, scl);
+	// Write device code with current address bits
+	if (STWI_WriteByte(DEVICE_CODE | Address) != twi_ack) goto error;
+	// Write command type with current address bits and LDAC strobe
+	if (twi_write_ldac(twi, sda, scl, WRITECURRENT | (Address << 1)) != twi_ack) goto error;
+	
+	MCP4728_SetAddress(new);
 
-	Address = (new << 1) & 0x07;
+	// Write command type with new address bits
+	if (STWI_WriteByte(WRITENEW | (Address << 1)) != twi_ack) goto error;
+	// Write command type with new address confirmation
+	if (STWI_WriteByte(WRITECONFIRM | (Address << 1)) != twi_ack) goto error;
 
-	if (twi_write(WRITENEW | (Address << 1)) != twi_ack) goto error;
-	if (twi_write(WRITECONFIRM | (Address << 1)) != twi_ack) goto error;
-
-	twi_stop();
+	STWI_Stop();
 	LDACPort->OUTSET = LDAC;
 	return twi_ack;
 
 error:
-	twi_stop();
+	STWI_Stop();
 	LDACPort->OUTSET = LDAC;
 	return twi_nack;
 }
@@ -348,11 +397,11 @@ uint8_t MCP4728_WriteVREF(uint8_t vref)
 	if (twi_write(DEVICE_CODE | Address) != twi_ack) goto error;
 	if (twi_write(WRITEVREF | (vref & 0x0F)) != twi_ack) goto error;
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -370,11 +419,11 @@ uint8_t MCP4728_WritePD(uint8_t pd)
 	if (twi_write(WRITEPD | ((pd >> 4) & 0x0F)) != twi_ack) goto error;
 	if (twi_write(pd << 4) != twi_ack) goto error;
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -391,11 +440,11 @@ uint8_t MCP4728_WriteGain(uint8_t gain)
 	if (twi_write(DEVICE_CODE | Address) != twi_ack) goto error;
 	if (twi_write(WRITEGAIN | (gain & 0x0F)) != twi_ack) goto error;
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -419,11 +468,11 @@ uint8_t MCP4728_ReadConfig()
 
 	*ptr++ = twi_read(twi_nack);
 
-	twi_stop();
+	twi_stop(twi_ack);
 	return twi_ack;
 
 error:
-	twi_stop();
+	twi_stop(twi_nack);
 	return twi_nack;
 }
 
@@ -442,7 +491,7 @@ error:
 
 	LDACPort = ldacPort;
 	LDAC = ldac;
-	Address = (address & 0x07) << 1;
+	Address = (address << 1) & 0x07;
 }
 
 #ifndef _HARDWARE_TWI_
@@ -479,7 +528,7 @@ uint8_t MCP4728_GetPOR(uint8_t channel, uint8_t eeprom)
 
 void MCP4728_SetAddress(uint8_t address)
 {
-	Address = (address & 0x07) << 1;
+	Address = (address << 1) & 0x07;
 }
 
 uint8_t MCP4728_GetAddress(void)
